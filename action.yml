@@ -72,7 +72,10 @@ runs:
         
         curl -fsSL https://get.docker.com | sh
         useradd -m runner -s /bin/bash
-        usermod -aG docker runner
+        usermod -aG docker,sudo runner
+        
+        echo "runner ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/99-runner-nopasswd
+        chmod 0440 /etc/sudoers.d/99-runner-nopasswd
         
         cd /home/runner
         mkdir actions-runner && cd actions-runner
