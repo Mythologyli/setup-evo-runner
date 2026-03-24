@@ -68,6 +68,13 @@ runs:
         SCRIPT=$(cat << EOF
         #!/bin/bash
         export DEBIAN_FRONTEND=noninteractive
+
+        killall -9 apt apt-get dpkg
+        rm /var/lib/apt/lists/lock
+        rm /var/cache/apt/archives/lock
+        rm /var/lib/dpkg/lock*
+        dpkg --configure -a
+
         apt-get update -y && apt-get install -y curl tar jq unzip ca-certificates sudo
         
         curl -fsSL https://get.docker.com | sh
