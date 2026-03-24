@@ -1,0 +1,109 @@
+name: 'Setup Alice EVO Runner'
+description: 'Dynamically provisions an Ephemeral EVO instance as a GitHub self-hosted runner.'
+branding:
+  icon: 'server'
+  color: 'orange'
+
+inputs:
+  evo_api_token:
+    description: 'API Token for Alice EVO Cloud'
+    required: true
+  github_token:
+    description: 'GitHub PAT with repo access to register the runner'
+    required: true
+  product_id:
+    description: 'EVO Plan ID (e.g., 41 for Ultra, 38 for Micro)'
+    required: false
+    default: '38'
+  os_id:
+    description: 'OS ID (e.g., 4 for Ubuntu 22.04 Minimal)'
+    required: false
+    default: '4'
+  runner_version:
+    description: 'GitHub Actions Runner version to install, or "latest"'
+    required: false
+    default: 'latest'
+  max_runtime:
+    description: 'Max runtime in hours (fallback to auto-destroy)'
+    required: false
+    default: '2'
+
+outputs:
+  instance_id:
+    description: 'The ID of the deployed EVO instance'
+    value: ${{ steps.deploy.outputs.instance_id }}
+  runner_label:
+    description: 'The unique label to use in your job runs-on'
+    value: ${{ steps.deploy.outputs.runner_label }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Deploy EVO Instance
+      id: deploy
+      shell: bash
+      run: |
+        RUNNER_LABEL="evo-${{ github.run_id }}-$RANDOM"
+        echo "runner_label=$RUNNER_LABEL" >> $GITHUB_OUTPUT
+        
+        TOKEN=$(curl -s -X POST -H "Authorization: token ${{ inputs.github_token }}" \
+        -H "Accept: application/vnd.github.v3+json" \
+        "https://api.github.com/repos/${{ github.repository }}/actions/runners/registration-token" | jq -r .token)
+        
+        if [ "$TOKEN" == "null" ] || [ -z "$TOKEN" ]; then
+          echo "::error::Failed to retrieve GitHub Runner token. Check your GH_PAT permissions."
+          exit 1
+        fi
+
+        TARGET_VERSION="${{ inputs.runner_version }}"
+        if [ "$TARGET_VERSION" == "latest" ]; then
+          echo "Fetching the latest GitHub Runner version..."
+          LATEST_TAG=$(curl -s -H "Authorization: token ${{ inputs.github_token }}" \
+            https://api.github.com/repos/actions/runner/releases/latest | jq -r .tag_name)
+          
+          TARGET_VERSION=${LATEST_TAG#v}
+          echo "Resolved latest version to: $TARGET_VERSION"
+        fi
+        
+        SCRIPT=$(cat << EOF
+        #!/bin/bash
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -y && apt-get install -y curl tar jq unzip ca-certificates sudo
+        
+        curl -fsSL https://get.docker.com | sh
+        useradd -m runner -s /bin/bash
+        usermod -aG docker runner
+        
+        cd /home/runner
+        mkdir actions-runner && cd actions-runner
+        curl -o actions-runner.tar.gz -L https://github.com/actions/runner/releases/download/v${TARGET_VERSION}/actions-runner-linux-x64-${TARGET_VERSION}.tar.gz
+        tar xzf ./actions-runner.tar.gz
+        chown -R runner:runner /home/runner
+        
+        sudo -u runner ./config.sh --url https://github.com/${{ github.repository }} --token $TOKEN --name "evo-node-$RANDOM" --unattended --ephemeral --labels $RUNNER_LABEL
+        sudo -u runner ./run.sh
+        EOF
+        )
+        
+        BASE64_SCRIPT=$(echo -n "$SCRIPT" | base64 -w 0)
+
+        RESPONSE=$(curl -s --location 'https://app.alice.ws/cli/v1/evo/instances/deploy' \
+        --header 'Authorization: Bearer ${{ inputs.evo_api_token }}' \
+        --header 'Content-Type: application/json' \
+        --data '{
+          "product_id": ${{ inputs.product_id }},
+          "os_id": ${{ inputs.os_id }},
+          "time": ${{ inputs.max_runtime }},
+          "ssh_key_id": null,
+          "boot_script": "'"$BASE64_SCRIPT"'"
+        }')
+        
+        INSTANCE_ID=$(echo "$RESPONSE" | jq -r '.data.id // empty')
+        
+        if [ -z "$INSTANCE_ID" ]; then
+          echo "::error::Error deploying EVO instance: $RESPONSE"
+          exit 1
+        fi
+        
+        echo "Successfully deployed EVO instance with ID: $INSTANCE_ID"
+        echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT

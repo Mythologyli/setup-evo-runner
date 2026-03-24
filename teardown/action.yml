@@ -1,0 +1,27 @@
+name: 'Teardown Alice EVO Runner'
+description: 'Destroys the Ephemeral EVO instance.'
+branding:
+  icon: 'trash-2'
+  color: 'red'
+
+inputs:
+  evo_api_token:
+    description: 'API Token for Alice EVO Cloud'
+    required: true
+  instance_id:
+    description: 'The ID of the EVO instance to destroy'
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Destroy Instance
+      shell: bash
+      run: |
+        echo "Attempting to destroy EVO Instance ID: ${{ inputs.instance_id }}..."
+        
+        RESPONSE=$(curl -s --request DELETE \
+        --url "https://app.alice.ws/cli/v1/evo/instances/${{ inputs.instance_id }}" \
+        --header 'Authorization: Bearer ${{ inputs.evo_api_token }}')
+        
+        echo "API Response: $RESPONSE"
