@@ -105,7 +105,7 @@ runs:
         echo "Installing sshpass for auth testing..."
         sudo apt-get update -y -qq && sudo apt-get install -y -qq sshpass
         
-        echo "Waiting for SSH service and Cloud-init auth on $INSTANCE_IP..."
+        echo "Waiting for SSH and Authentication on $INSTANCE_IP..."
         TIMEOUT=300
         INTERVAL=10
         ELAPSED=0
@@ -139,11 +139,22 @@ runs:
           set -e
           export DEBIAN_FRONTEND=noninteractive
 
-          echo ">> Cleaning up apt locks..."
-          killall -9 apt apt-get dpkg || true
-          rm -f /var/lib/apt/lists/lock
-          rm -f /var/cache/apt/archives/lock
-          rm -f /var/lib/dpkg/lock*
+          echo ">> Waiting gracefully for background apt processes to release locks..."
+          TIMEOUT=600
+          INTERVAL=10
+          ELAPSED=0
+
+          while ! apt-get check >/dev/null 2>&1; do
+            if [ $ELAPSED -ge $TIMEOUT ]; then
+              echo "::error::Timeout waiting for apt locks to be released. The system update might be stuck."
+              exit 1
+            fi
+            echo "APT is locked by another process. Waiting... (${ELAPSED}s / ${TIMEOUT}s)"
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+
+          echo ">> APT locks are free. Ensuring dpkg is fully configured..."
           dpkg --configure -a
 
           echo ">> Installing base dependencies..."
