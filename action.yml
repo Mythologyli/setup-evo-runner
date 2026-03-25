@@ -102,8 +102,29 @@ runs:
         echo "GH_REPO=${{ github.repository }}" >> $GITHUB_ENV
         echo "INSTALL_DOCKER=${{ inputs.install_docker }}" >> $GITHUB_ENV
 
-        echo "Waiting 30 seconds..."
-        sleep 30
+        echo "Installing sshpass for auth testing..."
+        sudo apt-get update -y -qq && sudo apt-get install -y -qq sshpass
+        
+        echo "Waiting for SSH service and Cloud-init auth on $INSTANCE_IP..."
+        TIMEOUT=300
+        INTERVAL=10
+        ELAPSED=0
+        
+        while [ $ELAPSED -lt $TIMEOUT ]; do
+          if sshpass -p "$INSTANCE_PASS" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -q $INSTANCE_USER@$INSTANCE_IP "echo 'ready'"; then
+            echo ">> SSH and Authentication are fully ready!"
+            break
+          fi
+          
+          echo "SSH/Auth not ready yet... retrying in ${INTERVAL}s (Elapsed: ${ELAPSED}s / ${TIMEOUT}s)"
+          sleep $INTERVAL
+          ELAPSED=$((ELAPSED + INTERVAL))
+        done
+        
+        if [ $ELAPSED -ge $TIMEOUT ]; then
+          echo "::error::Timeout waiting for SSH connection and authentication to become ready."
+          exit 1
+        fi
 
     - name: Run Setup Script via SSH
       uses: appleboy/ssh-action@v1
