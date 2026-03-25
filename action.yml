@@ -49,6 +49,7 @@ runs:
       run: |
         RUNNER_LABEL="evo-${{ github.run_id }}-$RANDOM"
         echo "runner_label=$RUNNER_LABEL" >> $GITHUB_OUTPUT
+        echo "RUNNER_LABEL=$RUNNER_LABEL" >> $GITHUB_ENV
         
         TOKEN=$(curl -s -X POST -H "Authorization: token ${{ inputs.github_token }}" \
         -H "Accept: application/vnd.github.v3+json" \
@@ -58,6 +59,7 @@ runs:
           echo "::error::Failed to retrieve GitHub Runner token. Check your GH_PAT permissions."
           exit 1
         fi
+        echo "RUNNER_TOKEN=$TOKEN" >> $GITHUB_ENV
 
         TARGET_VERSION="${{ inputs.runner_version }}"
         if [ "$TARGET_VERSION" == "latest" ]; then
@@ -68,43 +70,9 @@ runs:
           TARGET_VERSION=${LATEST_TAG#v}
           echo "Resolved latest version to: $TARGET_VERSION"
         fi
+        echo "TARGET_VERSION=$TARGET_VERSION" >> $GITHUB_ENV
         
-        SCRIPT=$(cat << EOF
-        #!/bin/bash
-        export DEBIAN_FRONTEND=noninteractive
-
-        killall -9 apt apt-get dpkg || true
-        rm -f /var/lib/apt/lists/lock
-        rm -f /var/cache/apt/archives/lock
-        rm -f /var/lib/dpkg/lock*
-        dpkg --configure -a
-
-        apt-get update -y && apt-get install -y curl tar jq unzip ca-certificates sudo
-        
-        useradd -m runner -s /bin/bash
-        usermod -aG sudo runner
-        
-        if [ "${{ inputs.install_docker }}" = "true" ]; then
-          curl -fsSL https://get.docker.com | sh
-          usermod -aG docker runner
-        fi
-        
-        echo "runner ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/99-runner-nopasswd
-        chmod 0440 /etc/sudoers.d/99-runner-nopasswd
-        
-        cd /home/runner
-        mkdir actions-runner && cd actions-runner
-        curl -o actions-runner.tar.gz -L https://github.com/actions/runner/releases/download/v${TARGET_VERSION}/actions-runner-linux-x64-${TARGET_VERSION}.tar.gz
-        tar xzf ./actions-runner.tar.gz
-        chown -R runner:runner /home/runner
-        
-        sudo -u runner ./config.sh --url https://github.com/${{ github.repository }} --token $TOKEN --name "evo-node-$RANDOM" --unattended --ephemeral --labels $RUNNER_LABEL
-        sudo -u runner ./run.sh
-        EOF
-        )
-        
-        BASE64_SCRIPT=$(echo -n "$SCRIPT" | base64 -w 0)
-
+        echo "Deploying EVO instance..."
         RESPONSE=$(curl -s --location 'https://app.alice.ws/cli/v1/evo/instances/deploy' \
         --header 'Authorization: Bearer ${{ inputs.evo_api_token }}' \
         --header 'Content-Type: application/json' \
@@ -112,16 +80,76 @@ runs:
           "product_id": ${{ inputs.product_id }},
           "os_id": ${{ inputs.os_id }},
           "time": ${{ inputs.max_runtime }},
-          "ssh_key_id": null,
-          "boot_script": "'"$BASE64_SCRIPT"'"
+          "ssh_key_id": null
         }')
         
         INSTANCE_ID=$(echo "$RESPONSE" | jq -r '.data.id // empty')
+        INSTANCE_IP=$(echo "$RESPONSE" | jq -r '.data.ipv4 // empty')
+        INSTANCE_USER=$(echo "$RESPONSE" | jq -r '.data.user // empty')
+        INSTANCE_PASS=$(echo "$RESPONSE" | jq -r '.data.password // empty')
         
         if [ -z "$INSTANCE_ID" ]; then
           echo "::error::Error deploying EVO instance: $RESPONSE"
           exit 1
         fi
         
-        echo "Successfully deployed EVO instance with ID: $INSTANCE_ID"
+        echo "Successfully deployed EVO instance with ID: $INSTANCE_ID (IP: $INSTANCE_IP)"
         echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
+        
+        echo "INSTANCE_IP=$INSTANCE_IP" >> $GITHUB_ENV
+        echo "INSTANCE_USER=$INSTANCE_USER" >> $GITHUB_ENV
+        echo "INSTANCE_PASS=$INSTANCE_PASS" >> $GITHUB_ENV
+        echo "GH_REPO=${{ github.repository }}" >> $GITHUB_ENV
+        echo "INSTALL_DOCKER=${{ inputs.install_docker }}" >> $GITHUB_ENV
+
+    - name: Run Setup Script via SSH
+      uses: appleboy/ssh-action@v1
+      with:
+        host: ${{ env.INSTANCE_IP }}
+        username: ${{ env.INSTANCE_USER }}
+        password: ${{ env.INSTANCE_PASS }}
+        timeout: 5m
+        command_timeout: 1h
+        envs: RUNNER_TOKEN,TARGET_VERSION,RUNNER_LABEL,GH_REPO,INSTALL_DOCKER
+        script: |
+          set -e
+          export DEBIAN_FRONTEND=noninteractive
+
+          echo ">> Cleaning up apt locks..."
+          killall -9 apt apt-get dpkg || true
+          rm -f /var/lib/apt/lists/lock
+          rm -f /var/cache/apt/archives/lock
+          rm -f /var/lib/dpkg/lock*
+          dpkg --configure -a
+
+          echo ">> Installing base dependencies..."
+          apt-get update -y && apt-get install -y curl tar jq unzip ca-certificates sudo
+
+          echo ">> Creating runner user..."
+          useradd -m runner -s /bin/bash
+          usermod -aG sudo runner
+
+          if [ "$INSTALL_DOCKER" = "true" ]; then
+            echo ">> Installing Docker..."
+            curl -fsSL https://get.docker.com | sh
+            usermod -aG docker runner
+          fi
+
+          echo ">> Configuring NOPASSWD sudo..."
+          echo "runner ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/99-runner-nopasswd
+          chmod 0440 /etc/sudoers.d/99-runner-nopasswd
+
+          echo ">> Downloading GitHub Actions Runner v${TARGET_VERSION}..."
+          cd /home/runner
+          mkdir actions-runner && cd actions-runner
+          curl -o actions-runner.tar.gz -L "https://github.com/actions/runner/releases/download/v${TARGET_VERSION}/actions-runner-linux-x64-${TARGET_VERSION}.tar.gz"
+          tar xzf ./actions-runner.tar.gz
+          chown -R runner:runner /home/runner
+
+          echo ">> Registering Runner..."
+          sudo -u runner ./config.sh --url "https://github.com/${GH_REPO}" --token "${RUNNER_TOKEN}" --name "evo-node-$RANDOM" --unattended --ephemeral --labels "${RUNNER_LABEL}"
+
+          echo ">> Starting Runner as a background service..."
+          sudo ./svc.sh install runner
+          sudo ./svc.sh start
+          echo ">> Setup Complete! Runner is now listening."
